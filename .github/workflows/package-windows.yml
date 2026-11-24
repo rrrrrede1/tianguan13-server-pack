@@ -305,9 +305,17 @@ jobs:
           Write-Host "== byond\bin 内容 =="
           Get-ChildItem $bin | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
 
-          Write-Host "== 试运行 dreamdaemon.exe（无参数，只看能不能加载）=="
-          $p = Start-Process -FilePath $exe -PassThru -Wait -ErrorAction SilentlyContinue
+          Write-Host "== 试运行 dreamdaemon.exe（5 秒后强杀，避免缺 DLL 时弹框阻塞）=="
+          # 不带重定向启动时，缺 DLL 会触发 Windows 的"无法启动"对话框并一直阻塞
+          # （首次实测把整个步骤挂死了）→ 必须用重定向 + 超时。
+          $o = Join-Path $env:RUNNER_TEMP 'dd-out.txt'
+          $e = Join-Path $env:RUNNER_TEMP 'dd-err.txt'
+          $p = Start-Process -FilePath $exe -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+          Start-Sleep -Seconds 5
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Write-Host "(进程还在跑，已强杀)" }
+          $p.Refresh()
           Write-Host "exit code = $($p.ExitCode)  (0xC0000135 = -1073741515 表示缺 DLL)"
+          foreach ($f in @($o,$e)) { if (Test-Path $f) { Get-Content $f -TotalCount 10 | Out-String | Write-Host } }
 
           $dumpbin = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' -ErrorAction SilentlyContinue |
                      Select-Object -First 1 -ExpandProperty FullName

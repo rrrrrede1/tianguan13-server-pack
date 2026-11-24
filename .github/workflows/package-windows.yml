@@ -402,14 +402,27 @@ jobs:
           $short = "${{ steps.deps.outputs.short }}"
           $name  = "TianGuan13-Server-$short-win64.zip"
           $src   = "TianGuan13-Source-$short.zip"
+          $root  = (Get-Location).Path
+
           7z a -tzip -mx=5 "$name" "${{ env.OUT_DIR }}\*" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "7z failed" }
-          git -C src archive --format=zip -o "$src" HEAD
+
+          # ⚠️ git -C src 会先切到 src/ 再执行，所以 -o 必须给绝对路径，
+          #    否则 zip 会落在 src\ 里（run #11 就是这样：git 返回 0 但根目录没有文件）
+          git -C src archive --format=zip -o "$root\$src" HEAD
           if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
-          (Get-FileHash $name -Algorithm SHA256).Hash.ToLower() + "  $name"  | Set-Content SHA256SUMS.txt
-          (Get-FileHash $src  -Algorithm SHA256).Hash.ToLower() + "  $src"   | Add-Content SHA256SUMS.txt
+
+          $lines = @(
+            foreach ($f in @($name,$src)) {
+              $full = Join-Path $root $f
+              if (-not (Test-Path $full)) { throw "$f 没生成（期望位置：$full）" }
+              Write-Host ("{0} = {1:N0} MB" -f $f, ((Get-Item $full).Length/1MB))
+              (Get-FileHash $full -Algorithm SHA256).Hash.ToLower() + "  $f"
+            }
+          )
+          if ($lines.Count -ne 2) { throw "SHA256SUMS 行数异常：$($lines.Count)" }
+          $lines | Set-Content -Path SHA256SUMS.txt -Encoding UTF8
           Get-Content SHA256SUMS.txt
-          foreach ($f in $name,$src) { Write-Host ("{0} = {1:N0} MB" -f $f, ((Get-Item $f).Length/1MB)) }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

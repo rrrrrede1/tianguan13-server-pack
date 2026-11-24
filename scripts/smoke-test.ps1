@@ -66,10 +66,14 @@ while ((Get-Date) -lt $deadline) {
 $memMB = 0
 if (-not $p.HasExited) {
   $p.Refresh()
-  $memMB = [math]::Round($p.WorkingSet64 / 1MB, 1)
-  Write-Host ("memory peak (working set) = {0} MB" -f $memMB)
-  # 32 位进程：这个数字长期接近/超过 1.5GB 就会有稳定性风险
-  if ($memMB -gt 1600) { Write-Warning "dreamdaemon 内存 ${memMB}MB 偏高（32 位进程）" }
+  # ⚠️ working set 会把 .rsc 的**文件映射页**也算进去（run #11 报 2269 MB），
+  #    对 32 位进程的真实压力应该看 private bytes（提交的私有内存）。
+  $wsMB   = [math]::Round($p.WorkingSet64 / 1MB, 1)
+  $privMB = [math]::Round($p.PrivateMemorySize64 / 1MB, 1)
+  Write-Host ("memory: working set = {0} MB | private = {1} MB" -f $wsMB, $privMB)
+  Write-Host "(32 位进程：private 才是真实堆压力；working set 含 mmap 的资源文件)"
+  if ($privMB -gt 1500) { Write-Warning "私有内存 ${privMB} MB 偏高（32 位上限约 2-4GB，长期跑有风险）" }
+  $memMB = $privMB
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
 }

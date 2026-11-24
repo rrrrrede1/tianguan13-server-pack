@@ -54,14 +54,31 @@ jobs:
 
     steps:
       # ---------- 1. 取源码（浅克隆：历史 3.5GB，必须 depth=1） ----------
+      - name: Resolve source ref
+        id: src
+        shell: bash
+        env:
+          REQ_REF: ${{ github.event.client_payload.sha || inputs.ref || 'main' }}
+        run: |
+          set -euo pipefail
+          ref="$REQ_REF"
+          # 手动填短 sha 时，GitHub 的 checkout 不认 → 先用 API 补全成 40 位
+          if [[ "$ref" =~ ^[0-9a-f]{7,39}$ ]]; then
+            full=$(curl -fsS "https://api.github.com/repos/${SOURCE_REPO}/commits/$ref" \
+                   | grep -m1 '"sha"' | cut -d'"' -f4)
+            echo "short sha '$ref' -> '$full'"
+            ref="$full"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "source ref = $ref"
+
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPO }}
           # 注意：tag 触发时 github.ref_name 是**本仓库**的 tag 名，在源码仓库里不存在
-          # → 源码 ref 只认 inputs.ref，缺省打 main（tag 名只当 Release 标签用）
-          # repository_dispatch 由 CT124 发来，带精确 sha，优先级最高
-          ref: ${{ github.event.client_payload.sha || inputs.ref || 'main' }}
+          # → 源码 ref 由上面的 Resolve 步骤决定（dispatch 带 sha > 手动输入 > main）
+          ref: ${{ steps.src.outputs.ref }}
           fetch-depth: 1
           path: src
 

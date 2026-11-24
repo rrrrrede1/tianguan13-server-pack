@@ -264,6 +264,7 @@ jobs:
             throw "vc-dlls\mfc140u.dll 不存在 —— 上一步没准备好运行库，包会跑不起来"
           }
           Copy-Item (Join-Path $stage '*.dll') (Join-Path $out 'byond\bin') -Force
+          Get-ChildItem (Join-Path $out 'byond\bin') | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
           Write-Host ("bundled VC++ dlls into byond\bin: {0}" -f ((Get-ChildItem $stage -Filter *.dll | Select-Object -Expand Name) -join ', '))
 
           # 6.3 配置（注意：仓库的 config.txt 里没有 SERVERNAME / I18N_SERVER_LOCALE，必须追加）
@@ -293,6 +294,36 @@ jobs:
           New-Item -ItemType Directory -Force (Join-Path $out 'data') | Out-Null
           $size = ((Get-ChildItem $out -Recurse -File -Force | Measure-Object Length -Sum).Sum / 1MB)
           Write-Host ("package size = {0:N0} MB" -f $size)
+
+      # ---------- 6.9 诊断：谁缺 DLL 就让它自己说出来 ----------
+      # 只打印信息，不判失败（真正的判据在冒烟测试）
+      - name: Diagnose DreamDaemon dependencies
+        shell: pwsh
+        run: |
+          $bin = Join-Path "${{ env.OUT_DIR }}" 'byond\bin'
+          $exe = Join-Path $bin 'dreamdaemon.exe'
+          Write-Host "== byond\bin 内容 =="
+          Get-ChildItem $bin | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+          Write-Host "== 试运行 dreamdaemon.exe（无参数，只看能不能加载）=="
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ErrorAction SilentlyContinue
+          Write-Host "exit code = $($p.ExitCode)  (0xC0000135 = -1073741515 表示缺 DLL)"
+
+          $dumpbin = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' -ErrorAction SilentlyContinue |
+                     Select-Object -First 1 -ExpandProperty FullName
+          if ($dumpbin) {
+            Write-Host "== dumpbin /dependents =="
+            & $dumpbin /nologo /dependents $exe 2>&1 | Out-String | Write-Host
+          } else {
+            Write-Host "(runner 上没有 dumpbin，跳过依赖列表)"
+          }
+
+          Write-Host "== 逐个依赖检查是否可解析（app 目录 / SysWOW64 / System32）=="
+          $dirs = @($bin, "$env:SystemRoot\SysWOW64", "$env:SystemRoot\System32")
+          foreach ($d in 'byondcore.dll','byondwin.dll','byondext.dll','mfc140u.dll','msvcp140.dll','vcruntime140.dll','fmodex.dll','comctl32.dll','ws2_32.dll','winmm.dll','ole32.dll','oleaut32.dll','d3d9.dll','dwmapi.dll','uxtheme.dll','shlwapi.dll') {
+            $where = $dirs | Where-Object { Test-Path (Join-Path $_ $d) } | Select-Object -First 1
+            Write-Host ("  {0,-22} {1}" -f $d, ($where ? $where : "MISSING"))
+          }
 
       # ---------- 7. 冒烟测试：真启动一次，等 Initializations complete ----------
       - name: Smoke test (real boot)

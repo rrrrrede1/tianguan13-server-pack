@@ -1,0 +1,291 @@
+name: Package Windows server
+
+# 事件触发（不用 cron —— 本环境已实测 schedule 不可靠）：
+#   1) 往源码仓库打 tag（server-*）→ 自动打包并发布 Release
+#   2) 手动 Run workflow，指定任意 commit/tag/branch → 只产出构件（填了 release_tag 才发 Release）
+#
+# 设计前提（都是实测得来的，见 tianguan13-manual-packaging-guide.md）：
+# - 构建必须跑在 Windows runner：用 Windows 版 BYOND 的 dm.exe/dreamdaemon.exe，
+#   仓库里自带的 rust_g.dll / dreamluau.dll / auxlua.dll 也只能在 Windows 上用。
+# - DM 编译必须带 -DCBT 且在 .dme 之前（build.ts 已正确处理，别绕过它手敲 dm.exe）。
+# - tgui 必须单独构建（tgui/public 源码里只有 4 个模板文件，构建后才 16 项）。
+# - biome-install 只服务 lint，但它是 tgui 目标的硬依赖 → 这里绕过它直接跑 tgui 脚本。
+# - deploy.sh 只拷 sound/runtime，而 rust_g 算音频时长要读磁盘上的 ogg
+#   → 额外镜像 src 里所有 sound/ 目录（否则 ambience 会刷 runtime）。
+# - BYOND 版本从 dependencies.sh 读，别硬编码；byond.com 会 429，要重试+缓存。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要打包的 commit / tag / branch（源码仓库 rrrrrede1/Tianguan13）'
+        required: true
+        default: 'main'
+      release_tag:
+        description: '发布成 Release 用的 tag（留空 = 只上传 Artifact）'
+        required: false
+        default: ''
+      server_name:
+        description: '服务器显示名（写进 config.txt 的 SERVERNAME）'
+        required: false
+        default: '天关13 本地测试服'
+  push:
+    tags: ['server-*']
+  # 主仓库（源码）更新时由 CT124 同步器发来的事件，payload 里带精确 sha
+  repository_dispatch:
+    types: [source-updated]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: rrrrrede1/Tianguan13
+  OUT_DIR: out/TianGuan13_Server
+
+jobs:
+  package:
+    name: Build & package (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      # ---------- 1. 取源码（浅克隆：历史 3.5GB，必须 depth=1） ----------
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          # 注意：tag 触发时 github.ref_name 是**本仓库**的 tag 名，在源码仓库里不存在
+          # → 源码 ref 只认 inputs.ref，缺省打 main（tag 名只当 Release 标签用）
+          # repository_dispatch 由 CT124 发来，带精确 sha，优先级最高
+          ref: ${{ github.event.client_payload.sha || inputs.ref || 'main' }}
+          fetch-depth: 1
+          path: src
+
+      - name: Checkout packaging repo
+        uses: actions/checkout@v4
+        with:
+          path: pack
+          fetch-depth: 1
+
+      - name: Read pinned versions
+        id: deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          # dependencies.sh 是版本唯一来源
+          BYOND_MAJOR=$(grep -E '^export BYOND_MAJOR=' src/dependencies.sh | cut -d= -f2)
+          BYOND_MINOR=$(grep -E '^export BYOND_MINOR=' src/dependencies.sh | cut -d= -f2)
+          BUN_VERSION=$(grep -E '^export BUN_VERSION=' src/dependencies.sh | cut -d= -f2)
+          echo "byond_major=$BYOND_MAJOR" >> "$GITHUB_OUTPUT"
+          echo "byond=$BYOND_MAJOR.$BYOND_MINOR" >> "$GITHUB_OUTPUT"
+          echo "bun=$BUN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git -C src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git -C src rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "datetag=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "byond=$BYOND_MAJOR.$BYOND_MINOR / bun=$BUN_VERSION"
+
+      # ---------- 2. BYOND（缓存 + 429 重试） ----------
+      - name: Cache BYOND
+        uses: actions/cache@v4
+        with:
+          path: byond
+          key: byond-${{ steps.deps.outputs.byond }}
+
+      - name: Fetch BYOND ${{ steps.deps.outputs.byond }}
+        shell: pwsh
+        run: |
+          $ver   = "${{ steps.deps.outputs.byond }}"
+          $major = "${{ steps.deps.outputs.byond_major }}"
+          $exe   = "byond\byond\bin\dm.exe"
+          if (Test-Path $exe) {
+            Write-Host "BYOND already cached: $exe"
+            exit 0
+          }
+          $url = "https://www.byond.com/download/build/$major/${ver}_byond.zip"
+          $zip = "byond.zip"
+          for ($i = 1; $i -le 6; $i++) {
+            try {
+              Write-Host "GET $url (attempt $i)"
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -Headers @{ 'User-Agent' = 'tianguan13-ci/1.0' }
+              break
+            } catch {
+              Write-Warning "attempt $i failed: $($_.Exception.Message)"
+              if ($i -eq 6) { throw "cannot download BYOND $ver (byond.com may be rate limiting: 429)" }
+              Start-Sleep -Seconds (10 * $i)
+            }
+          }
+          Expand-Archive -Path $zip -DestinationPath byond -Force
+          Remove-Item $zip -Force
+          if (-not (Test-Path $exe)) { throw "BYOND extracted but $exe missing" }
+          & $exe 2>&1 | Select-Object -First 3   # 打印版本，失败不影响
+
+      # ---------- 3. Bun（版本同样来自 dependencies.sh） ----------
+      - name: Setup Bun ${{ steps.deps.outputs.bun }}
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.deps.outputs.bun }}
+
+      # ---------- 4. tgui / tgfont（绕过 biome-install，它只服务 lint） ----------
+      - name: Build tgui & tgfont
+        shell: pwsh
+        working-directory: src
+        run: |
+          Push-Location tgui
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw "bun install (tgui) failed" }
+          bun run tgui:build
+          if ($LASTEXITCODE -ne 0) { throw "tgui:build failed" }
+          Set-Location packages/tgfont
+          bun run tgfont:build
+          if ($LASTEXITCODE -ne 0) { throw "tgfont:build failed" }
+          Pop-Location
+
+          # 断言：4 → 16，且 tgfont 产物在
+          $pub = (Get-ChildItem tgui\public -Force | Measure-Object).Count
+          Write-Host "tgui/public files = $pub"
+          if ($pub -lt 10) { throw "tgui bundles missing (public has $pub files, expected 16)" }
+          if (-not (Test-Path tgui\packages\tgfont\dist\tgfont.css)) { throw "tgfont.css missing" }
+
+      # ---------- 5. 编译 DM（-DCBT 由 build.ts 负责；顺带下 cutter + python） ----------
+      - name: Compile DM
+        shell: pwsh
+        working-directory: src
+        env:
+          DM_EXE: ${{ github.workspace }}\byond\byond\bin\dm.exe
+        run: |
+          bun tools/build/build.ts dm
+          if ($LASTEXITCODE -ne 0) { throw "DM compile failed (see log above: need '0 errors')" }
+          foreach ($f in 'tgstation.dmb','tgstation.rsc') {
+            if (-not (Test-Path $f)) { throw "$f not produced" }
+            Write-Host ("{0} = {1:N1} MB" -f $f, ((Get-Item $f).Length / 1MB))
+          }
+
+      # ---------- 6. 组装 ----------
+      - name: Assemble (deploy.sh + engine + config + launchers + sounds)
+        shell: pwsh
+        run: |
+          $out = "${{ env.OUT_DIR }}"
+          New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null
+          if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+
+          # 6.1 deploy.sh（官方清单；Git Bash 里跑，Msys 分支才会拷 dll）
+          Push-Location src
+          $env:MSYS_NO_PATHCONV = "1"
+          bash tools/deploy.sh "../$out"
+          Pop-Location
+          if ((Get-ChildItem $out -Force | Measure-Object).Count -lt 8) { throw "deploy.sh produced too little" }
+
+          # 6.2 便携引擎（整目录，玩家不用装 BYOND）
+          Copy-Item byond\byond $out\byond -Recurse -Force
+
+          # 6.3 配置（注意：仓库的 config.txt 里没有 SERVERNAME / I18N_SERVER_LOCALE，必须追加）
+          Copy-Item src\config $out\config -Recurse -Force
+          $cfg = Join-Path $out 'config\config.txt'
+          $name = if ("${{ inputs.server_name }}") { "${{ inputs.server_name }}" } else { "天关13 本地测试服" }
+          Add-Content -Path $cfg -Value "`r`nSERVERNAME $name`r`nI18N_SERVER_LOCALE zh-Hans" -Encoding UTF8
+
+          # 6.4 启动脚本
+          Copy-Item pack\launcher\*.bat $out -Force
+
+          # 6.5 声音补齐：deploy.sh 只拷 sound/runtime，而 rust_g 算音频时长要读磁盘
+          #     → 把 src 里所有 sound 目录整体镜像进包（通用，不写死模块名）
+          $srcRoot = (Resolve-Path src).Path
+          $n = 0
+          Get-ChildItem -Path src -Recurse -Directory -Filter sound -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\node_modules\\' } |
+            ForEach-Object {
+              $rel = $_.FullName.Substring($srcRoot.Length + 1)
+              $dst = Join-Path $out $rel
+              New-Item -ItemType Directory -Force $dst | Out-Null
+              Copy-Item (Join-Path $_.FullName '*') $dst -Recurse -Force -ErrorAction SilentlyContinue
+              $n++
+            }
+          Write-Host "mirrored $n sound directories"
+
+          New-Item -ItemType Directory -Force (Join-Path $out 'data') | Out-Null
+          $size = ((Get-ChildItem $out -Recurse -File -Force | Measure-Object Length -Sum).Sum / 1MB)
+          Write-Host ("package size = {0:N0} MB" -f $size)
+
+      # ---------- 7. 冒烟测试：真启动一次，等 Initializations complete ----------
+      - name: Smoke test (real boot)
+        shell: pwsh
+        run: ./pack/scripts/smoke-test.ps1 -PackageDir "${{ env.OUT_DIR }}"
+
+      # ---------- 8. 打包 + 源码归档（AGPL） + 校验和 ----------
+      - name: Zip package & source
+        shell: pwsh
+        run: |
+          $short = "${{ steps.deps.outputs.short }}"
+          $name  = "TianGuan13-Server-$short-win64.zip"
+          $src   = "TianGuan13-Source-$short.zip"
+          7z a -tzip -mx=5 "$name" "${{ env.OUT_DIR }}\*" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z failed" }
+          git -C src archive --format=zip -o "$src" HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
+          (Get-FileHash $name -Algorithm SHA256).Hash.ToLower() + "  $name"  | Set-Content SHA256SUMS.txt
+          (Get-FileHash $src  -Algorithm SHA256).Hash.ToLower() + "  $src"   | Add-Content SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          foreach ($f in $name,$src) { Write-Host ("{0} = {1:N0} MB" -f $f, ((Get-Item $f).Length/1MB)) }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TianGuan13-Server-${{ steps.deps.outputs.short }}
+          path: |
+            TianGuan13-Server-*.zip
+            TianGuan13-Source-*.zip
+            SHA256SUMS.txt
+          retention-days: 14
+
+      # ---------- 9. 决定发布标签 ----------
+      # 手动跑：只有填了 release_tag 才发；打 tag：用该 tag；dispatch（上游更新）：自动发 server-<短sha>
+      - name: Decide release tag
+        id: rel
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          if [ -z "$tag" ] && [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            tag="server-${{ steps.deps.outputs.short }}"
+          fi
+          if [ -z "$tag" ] && [ "${{ github.event_name }}" = "push" ]; then
+            tag="${{ github.ref_name }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then echo "release tag = (none) → 只上传 Artifact"; else echo "release tag = $tag"; fi
+
+      # ---------- 10. 发布 Release ----------
+      - name: Publish release
+        if: ${{ steps.rel.outputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: 天关13 一键包 · ${{ steps.deps.outputs.datetag }} · ${{ steps.deps.outputs.short }}
+          make_latest: true
+          body: |
+            Windows 一键开服包（自带 BYOND 引擎，解压双击 `start_server.bat`）
+
+            - 源码 commit：`${{ steps.deps.outputs.sha }}`
+            - BYOND：`${{ steps.deps.outputs.byond }}`
+            - 构建：GitHub Actions [`${{ github.run_id }}`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})（windows-latest）
+            - 触发方式：`${{ github.event_name }}`
+            - 校验：见 `SHA256SUMS.txt`
+
+            ⚠️ **这里是"每次上游更新都新增一条"的发布页**：带 `Latest` 徽章的就是最新版；
+            也可以永远用这个固定地址拿最新版：
+            `${{ github.server_url }}/${{ github.repository }}/releases/latest`
+            旧版本都保留在下面，需要回滚时按 commit 挑即可。
+
+            ⚠️ 玩家连接仍需自行安装 BYOND 客户端（包内 `byond\bin\dreamseeker.exe` 仅用于本机测试）。
+            ⚠️ 许可 AGPL-3.0：源码归档 `TianGuan13-Source-*.zip` 与本包同页提供。
+            ⚠️ 非官方社区包，与上游无隶属关系。
+          files: |
+            TianGuan13-Server-*.zip
+            TianGuan13-Source-*.zip
+            SHA256SUMS.txt
+          fail_on_unmatched_files: true

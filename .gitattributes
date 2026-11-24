@@ -1,0 +1,8 @@
+# 行尾固定，避免不同机器 clone 后 bat/sh 被换行符搞坏
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.md      text eol=lf

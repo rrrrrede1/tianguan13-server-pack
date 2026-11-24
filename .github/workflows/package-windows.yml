@@ -60,14 +60,22 @@ jobs:
         env:
           REQ_REF: ${{ github.event.client_payload.sha || inputs.ref || 'main' }}
         run: |
-          set -euo pipefail
+          # 注意：这里刻意不用 "curl | grep -m1 | cut" 这种管道 —— grep -m1 提前退出会
+          # 让 curl 收到 SIGPIPE 而以 (23) 失败，在 pipefail 下整步直接中止（已实测）
+          set -uo pipefail
           ref="$REQ_REF"
-          # 手动填短 sha 时，GitHub 的 checkout 不认 → 先用 API 补全成 40 位
           if [[ "$ref" =~ ^[0-9a-f]{7,39}$ ]]; then
-            full=$(curl -fsS "https://api.github.com/repos/${SOURCE_REPO}/commits/$ref" \
-                   | grep -m1 '"sha"' | cut -d'"' -f4)
-            echo "short sha '$ref' -> '$full'"
-            ref="$full"
+            json=$(curl -sS --max-time 25 -H 'Accept: application/vnd.github+json' \
+                     "https://api.github.com/repos/${SOURCE_REPO}/commits/$ref")
+            if [[ "$json" =~ \"sha\"[[:space:]]*:[[:space:]]*\"([0-9a-f]{40})\" ]]; then
+              full="${BASH_REMATCH[1]}"
+              echo "short sha '$ref' -> '$full'"
+              ref="$full"
+            else
+              echo "::error::cannot resolve ref '$ref' (HTTP response below)"
+              printf '%s\n' "${json:0:400}"
+              exit 1
+            fi
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "source ref = $ref"

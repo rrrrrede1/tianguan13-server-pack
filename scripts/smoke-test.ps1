@@ -43,6 +43,10 @@ while ((Get-Date) -lt $deadline) {
   Start-Sleep -Seconds 5
   if ($p.HasExited) {
     Write-Warning "DreamDaemon exited early (code $($p.ExitCode))"
+    if ($p.ExitCode -eq -1073741515) {
+      Write-Warning "0xC0000135 = STATUS_DLL_NOT_FOUND：dreamdaemon.exe 缺 DLL"
+      Write-Warning "最常见是缺 x86 VC++ 运行库的 mfc140u.dll；把 mfc140u.dll / msvcp140.dll / vcruntime140.dll 放进 byond\bin 即可"
+    }
     break
   }
   if (Test-Path $log) {

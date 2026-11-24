@@ -130,6 +130,22 @@ jobs:
         with:
           bun-version: ${{ steps.deps.outputs.bun }}
 
+      # ---------- 3.5 x86 VC++ 运行库（DreamDaemon 依赖 mfc140u.dll） ----------
+      # 实测：dm.exe 只要 vcruntime140.dll（运行器上有），但 dreamdaemon.exe 还要 mfc140u.dll
+      # → 缺了会以 0xC0000135 (STATUS_DLL_NOT_FOUND) 秒退。这里装上，并把 DLL 打进包。
+      - name: Install x86 VC++ runtime
+        shell: pwsh
+        run: |
+          $vc = Join-Path $env:RUNNER_TEMP 'vc_redist.x86.exe'
+          Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x86.exe' -OutFile $vc -UseBasicParsing
+          $p = Start-Process -FilePath $vc -ArgumentList '/install','/quiet','/norestart' -Wait -PassThru
+          Write-Host "vcredist exit code = $($p.ExitCode) (0 或 3010 都算成功)"
+          if ($p.ExitCode -notin 0,3010) { throw "vcredist x86 install failed: $($p.ExitCode)" }
+          foreach ($d in 'mfc140u.dll','msvcp140.dll','vcruntime140.dll') {
+            $f = Join-Path $env:SystemRoot "SysWOW64\$d"
+            Write-Host ("{0} -> {1}" -f $d, (Test-Path $f))
+          }
+
       # ---------- 4. tgui / tgfont（绕过 biome-install，它只服务 lint） ----------
       - name: Build tgui & tgfont
         shell: pwsh
@@ -182,6 +198,18 @@ jobs:
 
           # 6.2 便携引擎（整目录，玩家不用装 BYOND）
           Copy-Item byond\byond $out\byond -Recurse -Force
+
+          # 6.2.1 把 x86 VC++ 运行库打进 byond\bin（app-local 部署）
+          #       BYOND 的 zip 不自带 MFC，dreamdaemon.exe 需要 mfc140u.dll；
+          #       不打包的话，玩家电脑没装 VC++ 2015 x86 运行库就会 0xC0000135 秒退
+          $vcDlls = 'mfc140u.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','concrt140.dll','vcruntime140.dll'
+          $bundled = @()
+          foreach ($d in $vcDlls) {
+            $f = Join-Path $env:SystemRoot "SysWOW64\$d"
+            if (Test-Path $f) { Copy-Item $f (Join-Path $out 'byond\bin') -Force; $bundled += $d }
+          }
+          Write-Host ("bundled VC++ dlls: {0}" -f ($bundled -join ', '))
+          if ($bundled -notcontains 'mfc140u.dll') { throw "mfc140u.dll 没拿到 —— 包里缺它，DreamDaemon 会启动失败" }
 
           # 6.3 配置（注意：仓库的 config.txt 里没有 SERVERNAME / I18N_SERVER_LOCALE，必须追加）
           Copy-Item src\config $out\config -Recurse -Force

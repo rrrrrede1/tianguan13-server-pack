@@ -157,19 +157,51 @@ jobs:
 
       # ---------- 3.5 x86 VC++ 运行库（DreamDaemon 依赖 mfc140u.dll） ----------
       # 实测：dm.exe 只要 vcruntime140.dll（运行器上有），但 dreamdaemon.exe 还要 mfc140u.dll
-      # → 缺了会以 0xC0000135 (STATUS_DLL_NOT_FOUND) 秒退。这里装上，并把 DLL 打进包。
-      - name: Install x86 VC++ runtime
+      # → 缺了会以 0xC0000135 (STATUS_DLL_NOT_FOUND) 秒退。
+      # 又实测：装 vcredist 会返回 1638（已存在更新版本）而被跳过，SysWOW64 里依然没有 MFC
+      # → 所以"装"只是尽力，真正的兜底是：在 SysWOW64 / VS 的 Redist 目录里把 DLL 找出来，
+      #    放 staging 目录，稍后原样打进包的 byond\bin（app-local 部署，玩家端也不需要装运行库）。
+      - name: Provide x86 VC++ runtime DLLs
         shell: pwsh
         run: |
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'vc-dlls'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
           $vc = Join-Path $env:RUNNER_TEMP 'vc_redist.x86.exe'
-          Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x86.exe' -OutFile $vc -UseBasicParsing
-          $p = Start-Process -FilePath $vc -ArgumentList '/install','/quiet','/norestart' -Wait -PassThru
-          Write-Host "vcredist exit code = $($p.ExitCode) (0 或 3010 都算成功)"
-          if ($p.ExitCode -notin 0,3010) { throw "vcredist x86 install failed: $($p.ExitCode)" }
-          foreach ($d in 'mfc140u.dll','msvcp140.dll','vcruntime140.dll') {
-            $f = Join-Path $env:SystemRoot "SysWOW64\$d"
-            Write-Host ("{0} -> {1}" -f $d, (Test-Path $f))
+          try {
+            Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x86.exe' -OutFile $vc -UseBasicParsing
+            $p = Start-Process -FilePath $vc -ArgumentList '/install','/quiet','/norestart' -Wait -PassThru
+            Write-Host "vcredist exit = $($p.ExitCode)  (0/3010=成功；1638=已有更新版本，继续找 DLL)"
+          } catch {
+            Write-Warning "vcredist install skipped: $($_.Exception.Message)"
           }
+
+          $want = @('mfc140u.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','concrt140.dll','vcruntime140.dll')
+          $roots = @(
+            "$env:SystemRoot\SysWOW64",
+            'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x86\Microsoft.VC*',
+            'C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x86\Microsoft.VC*'
+          )
+
+          $got = @()
+          foreach ($d in $want) {
+            $src = $null
+            foreach ($r in $roots) {
+              $hit = Get-ChildItem -Path (Join-Path $r $d) -File -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($hit) { $src = $hit.FullName; break }
+            }
+            if ($src) {
+              Copy-Item $src $stage -Force
+              $got += $d
+              Write-Host ("  {0,-18} <- {1}" -f $d, $src)
+            } else {
+              Write-Host ("  {0,-18} (not found)" -f $d)
+            }
+          }
+          if ($got -notcontains 'mfc140u.dll') {
+            throw "mfc140u.dll 找不到：SysWOW64 与 VS Redist 目录都没有 —— DreamDaemon 无法运行"
+          }
+          Write-Host "staged: $($got -join ', ')"
 
       # ---------- 4. tgui / tgfont（绕过 biome-install，它只服务 lint） ----------
       - name: Build tgui & tgfont
@@ -226,15 +258,13 @@ jobs:
 
           # 6.2.1 把 x86 VC++ 运行库打进 byond\bin（app-local 部署）
           #       BYOND 的 zip 不自带 MFC，dreamdaemon.exe 需要 mfc140u.dll；
-          #       不打包的话，玩家电脑没装 VC++ 2015 x86 运行库就会 0xC0000135 秒退
-          $vcDlls = 'mfc140u.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','concrt140.dll','vcruntime140.dll'
-          $bundled = @()
-          foreach ($d in $vcDlls) {
-            $f = Join-Path $env:SystemRoot "SysWOW64\$d"
-            if (Test-Path $f) { Copy-Item $f (Join-Path $out 'byond\bin') -Force; $bundled += $d }
+          #       运行器上一般也没有 → 由 "Provide x86 VC++ runtime DLLs" 步骤先放到 vc-dlls\
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'vc-dlls'
+          if (-not (Test-Path (Join-Path $stage 'mfc140u.dll'))) {
+            throw "vc-dlls\mfc140u.dll 不存在 —— 上一步没准备好运行库，包会跑不起来"
           }
-          Write-Host ("bundled VC++ dlls: {0}" -f ($bundled -join ', '))
-          if ($bundled -notcontains 'mfc140u.dll') { throw "mfc140u.dll 没拿到 —— 包里缺它，DreamDaemon 会启动失败" }
+          Copy-Item (Join-Path $stage '*.dll') (Join-Path $out 'byond\bin') -Force
+          Write-Host ("bundled VC++ dlls into byond\bin: {0}" -f ((Get-ChildItem $stage -Filter *.dll | Select-Object -Expand Name) -join ', '))
 
           # 6.3 配置（注意：仓库的 config.txt 里没有 SERVERNAME / I18N_SERVER_LOCALE，必须追加）
           Copy-Item src\config $out\config -Recurse -Force

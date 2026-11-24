@@ -264,8 +264,36 @@ jobs:
             throw "vc-dlls\mfc140u.dll 不存在 —— 上一步没准备好运行库，包会跑不起来"
           }
           Copy-Item (Join-Path $stage '*.dll') (Join-Path $out 'byond\bin') -Force
-          Get-ChildItem (Join-Path $out 'byond\bin') | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
           Write-Host ("bundled VC++ dlls into byond\bin: {0}" -f ((Get-ChildItem $stage -Filter *.dll | Select-Object -Expand Name) -join ', '))
+
+          # 6.2.2 把 DX9 的 d3dx9_43.dll / D3DCompiler_43.dll 解出来也放进 byond\bin
+          #       实测（dumpbin + 字符串扫描）：byondwin.dll 依赖 d3d9.dll 和 d3dx9_43.dll。
+          #       开发机有 DX9 所以本地能跑；GitHub 运行器没有 → dreamdaemon 加载 byondwin.dll
+          #       失败，表现为 0xC0000135。BYOND 的 zip 自带 directx\*.cab 正是给这个用的。
+          $dxDir = Join-Path $out 'byond\directx'
+          $expand = Join-Path $env:SystemRoot 'System32\expand.exe'
+          $dxNeeded = @(
+            @{ Cab = 'Jun2010_d3dx9_43_x86.cab';        Dll = 'd3dx9_43.dll' },
+            @{ Cab = 'Jun2010_D3DCompiler_43_x86.cab';  Dll = 'D3DCompiler_43.dll' }
+          )
+          foreach ($n in $dxNeeded) {
+            $cab = Join-Path $dxDir $n.Cab
+            if (-not (Test-Path $cab)) { Write-Warning "cab 不存在：$cab（跳过 $($n.Dll)）"; continue }
+            $tmp = Join-Path $env:RUNNER_TEMP ("dx_" + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force $tmp | Out-Null
+            & $expand "-F:$($n.Dll)" $cab $tmp 2>&1 | Out-Null
+            $got = Get-ChildItem $tmp -Recurse -Filter $n.Dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($got) {
+              Copy-Item $got.FullName (Join-Path $out 'byond\bin') -Force
+              Write-Host ("  DX: {0} <- {1}" -f $n.Dll, $cab)
+            } else {
+              Write-Warning "没能从 $($n.Cab) 解出 $($n.Dll)"
+            }
+            Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if (-not (Test-Path (Join-Path $out 'byond\bin\d3dx9_43.dll'))) {
+            throw "d3dx9_43.dll 没能放进 byond\bin —— byondwin.dll 会加载失败（0xC0000135）"
+          }
 
           # 6.3 配置（注意：仓库的 config.txt 里没有 SERVERNAME / I18N_SERVER_LOCALE，必须追加）
           Copy-Item src\config $out\config -Recurse -Force
@@ -328,7 +356,7 @@ jobs:
 
           Write-Host "== 逐个依赖检查是否可解析（app 目录 / SysWOW64 / System32）=="
           $dirs = @($bin, "$env:SystemRoot\SysWOW64", "$env:SystemRoot\System32")
-          foreach ($d in 'byondcore.dll','byondwin.dll','byondext.dll','mfc140u.dll','msvcp140.dll','vcruntime140.dll','fmodex.dll','comctl32.dll','ws2_32.dll','winmm.dll','ole32.dll','oleaut32.dll','d3d9.dll','dwmapi.dll','uxtheme.dll','shlwapi.dll') {
+          foreach ($d in 'byondcore.dll','byondwin.dll','byondext.dll','mfc140u.dll','msvcp140.dll','vcruntime140.dll','d3dx9_43.dll','D3DCompiler_43.dll','d3d9.dll','fmodex.dll','comctl32.dll','ws2_32.dll','winmm.dll','ole32.dll','oleaut32.dll','dwmapi.dll','uxtheme.dll','shlwapi.dll') {
             $where = $dirs | Where-Object { Test-Path (Join-Path $_ $d) } | Select-Object -First 1
             Write-Host ("  {0,-22} {1}" -f $d, ($where ? $where : "MISSING"))
           }

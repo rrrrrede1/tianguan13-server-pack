@@ -19,9 +19,16 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $pkg = (Resolve-Path $PackageDir).Path
-$dd  = Join-Path $pkg 'byond\bin\dreamdaemon.exe'
 $dmb = Join-Path $pkg 'tgstation.dmb'
 $log = Join-Path $pkg 'data\server.log'
+
+# ⚠️ 实测（2026-11-25，GitHub windows-latest）：dreamdaemon.exe 是 GUI 程序，
+# 在无桌面的 runner 上会卡在窗口/图形初始化——60 秒后进程仍存活、零输出、不写日志。
+# 而 dd.exe（控制台版守护进程）能正常开世界：23 秒就 "World loaded"。
+# 所以 CI 冒烟测试优先用 dd.exe；玩家端仍然用 dreamdaemon.exe（有桌面、能看窗口日志）。
+$dd = Join-Path $pkg 'byond\bin\dd.exe'
+if (-not (Test-Path $dd)) { $dd = Join-Path $pkg 'byond\bin\dreamdaemon.exe' }
+Write-Host ("launcher = {0}" -f (Split-Path $dd -Leaf))
 
 foreach ($f in @($dd, $dmb)) {
   if (-not (Test-Path $f)) { throw "smoke test: missing $f" }

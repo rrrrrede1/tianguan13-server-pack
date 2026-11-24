@@ -345,6 +345,34 @@ jobs:
           Write-Host "exit code = $($p.ExitCode)  (0xC0000135 = -1073741515 表示缺 DLL)"
           foreach ($f in @($o,$e)) { if (Test-Path $f) { Get-Content $f -TotalCount 10 | Out-String | Write-Host } }
 
+          # ---- 带参数实跑 60 秒：看它到底是"在加载"还是"卡死在对话框" ----
+          $pkg = (Resolve-Path "${{ env.OUT_DIR }}").Path
+          $probeLog = Join-Path $pkg 'data\probe.log'
+          Remove-Item $probeLog -ErrorAction SilentlyContinue
+          foreach ($launcher in @('dreamdaemon.exe','dd.exe')) {
+            $lx = Join-Path $pkg "byond\bin\$launcher"
+            if (-not (Test-Path $lx)) { continue }
+            Write-Host "== 用 $launcher 实跑 60 秒 =="
+            $po = Join-Path $env:RUNNER_TEMP "$launcher.out.txt"
+            $pe = Join-Path $env:RUNNER_TEMP "$launcher.err.txt"
+            $pi = Join-Path $env:RUNNER_TEMP "$launcher.in.txt"
+            '' | Set-Content $pi -Encoding ascii     # 空 stdin，避免任何 "按任意键" 阻塞
+            $pr = Start-Process -FilePath $lx -WorkingDirectory $pkg -PassThru `
+                    -ArgumentList @('tgstation.dmb','-port','1338','-trusted','-log',$probeLog,'-verbose') `
+                    -RedirectStandardOutput $po -RedirectStandardError $pe -RedirectStandardInput $pi
+            for ($t = 0; $t -lt 60; $t += 5) {
+              Start-Sleep -Seconds 5
+              if ($pr.HasExited) { break }
+            }
+            $alive = -not $pr.HasExited
+            if ($alive) { Write-Host "(60s 后仍存活 → 可能卡住)" ; Stop-Process -Id $pr.Id -Force -ErrorAction SilentlyContinue }
+            $pr.Refresh()
+            Write-Host ("exit={0}  log存在的={1}" -f $pr.ExitCode, (Test-Path $probeLog))
+            if (Test-Path $probeLog) { Write-Host "--- probe.log 前 15 行 ---"; Get-Content $probeLog -TotalCount 15 | Out-String | Write-Host }
+            foreach ($x in @($po,$pe)) { if ((Test-Path $x) -and (Get-Item $x).Length -gt 0) { Write-Host "--- $([IO.Path]::GetFileName($x)) ---"; Get-Content $x -TotalCount 20 | Out-String | Write-Host } }
+            if ($pr.ExitCode -ne 0 -and -not $alive) { Write-Host "($launcher 已退出，继续试下一个)" }
+          }
+
           $dumpbin = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' -ErrorAction SilentlyContinue |
                      Select-Object -First 1 -ExpandProperty FullName
           if ($dumpbin) {
@@ -358,7 +386,8 @@ jobs:
           $dirs = @($bin, "$env:SystemRoot\SysWOW64", "$env:SystemRoot\System32")
           foreach ($d in 'byondcore.dll','byondwin.dll','byondext.dll','mfc140u.dll','msvcp140.dll','vcruntime140.dll','d3dx9_43.dll','D3DCompiler_43.dll','d3d9.dll','fmodex.dll','comctl32.dll','ws2_32.dll','winmm.dll','ole32.dll','oleaut32.dll','dwmapi.dll','uxtheme.dll','shlwapi.dll') {
             $where = $dirs | Where-Object { Test-Path (Join-Path $_ $d) } | Select-Object -First 1
-            Write-Host ("  {0,-22} {1}" -f $d, ($where ? $where : "MISSING"))
+            if (-not $where) { $where = 'MISSING' }
+            Write-Host ("  {0,-22} {1}" -f $d, $where)
           }
 
       # ---------- 7. 冒烟测试：真启动一次，等 Initializations complete ----------

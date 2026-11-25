@@ -71,7 +71,41 @@ if ($sk -match 'tg_lobby_suppressed\(\)') {
   Write-Host "  [ok] 天关版: get_title_html() 开头已插入 tg_lobby_suppressed() 守卫"
 }
 
-# ---------- 3. 自检（改完必须验，别信"写成功"） ----------
+# ---------- 3. 运行期自检日志（TG-DIAG）----------
+# 目的：大厅是否真的用了天关版 HTML、图标能不能从磁盘找到，都写进 data\server.log，
+#       玩家一开服就能看到，不用靠猜。看到 TG-DIAG 行就说明这些代码真的在跑。
+$np = Join-Path $SrcDir 'modular_skyrat/modules/title_screen/code/new_player.dm'
+if (-not (Test-Path $np)) { throw "patch-lobby: 找不到 $np" }
+
+$sk3 = [IO.File]::ReadAllText($skyrat, [Text.Encoding]::UTF8)
+if ($sk3 -notmatch 'TG-DIAG html_start') {
+  $m2 = [regex]::Match($sk3, '(?m)^(\t+)var/dat = SStitle\.title_html')
+  if (-not $m2.Success) { throw "patch-lobby: 找不到 `var/dat = SStitle.title_html`（无法插入 TG-DIAG）" }
+  $tab2 = $m2.Groups[1].Value
+  # 注意：DM 的字符串插值里不能嵌套双引号（"…[fexists("x")]…" 会把字符串截断），
+  #       所以先算成布尔变量再插值 —— 代码库惯例也是用 {"..."} 规避这个问题。
+  $diag = @(
+    ($tab2 + 'var/tgdiag_wiki = fexists("modular_tianguan/modules/tg_lobby/icons/wiki.png")'),
+    ($tab2 + 'var/tgdiag_art = fexists("modular_skyrat/modules/title_screen/icons/loading_screen.gif")'),
+    ($tab2 + 'log_world("TG-DIAG html_start state=[SSticker.current_state] preamble_len=[length(dat)] wiki_fexists=[tgdiag_wiki] art_fexists=[tgdiag_art]")')
+  ) -join "`n"
+  $sk3 = $sk3.Remove($m2.Index, $m2.Length).Insert($m2.Index, $m2.Value + "`n" + $diag)
+  [IO.File]::WriteAllText($skyrat, $sk3, (New-Object Text.UTF8Encoding($false)))
+  Write-Host "  [ok] 天关版: 已插入 TG-DIAG 起始日志"
+} else { Write-Host "  [skip] 天关版已有 TG-DIAG" }
+
+$npTxt = [IO.File]::ReadAllText($np, [Text.Encoding]::UTF8)
+if ($npTxt -notmatch 'TG-DIAG final_html') {
+  $m3 = [regex]::Match($npTxt, '(?m)^(\t+)var/dat = get_title_html\(\)')
+  if (-not $m3.Success) { throw "patch-lobby: 找不到 `var/dat = get_title_html()`（无法插入 TG-DIAG）" }
+  $tab3 = $m3.Groups[1].Value
+  $diag2 = $tab3 + 'log_world("TG-DIAG final_html len=[length(dat)]")'
+  $npTxt = $npTxt.Remove($m3.Index, $m3.Length).Insert($m3.Index, $m3.Value + "`n" + $diag2)
+  [IO.File]::WriteAllText($np, $npTxt, (New-Object Text.UTF8Encoding($false)))
+  Write-Host "  [ok] update_title_screen: 已插入 TG-DIAG 结束日志"
+} else { Write-Host "  [skip] update_title_screen 已有 TG-DIAG" }
+
+# ---------- 4. 自检（改完必须验，别信"写成功"） ----------
 $zzAfter = [IO.File]::ReadAllText($zzplurt, [Text.Encoding]::UTF8)
 $skAfter = [IO.File]::ReadAllText($skyrat, [Text.Encoding]::UTF8)
 if ($zzAfter -match '(?m)^\s*/mob/dead/new_player(/proc)?/get_title_html\s*\(') { throw "自检失败：zzplurt 里仍有 get_title_html() 覆盖" }

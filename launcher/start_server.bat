@@ -30,8 +30,9 @@ echo   LAN players  : byond://YOUR-LAN-IP:%PORT%
 echo.
 echo   The server runs in its own window (TianGuan13 DreamDaemon).
 echo   THIS window shows its live log (data\server.log).
-echo   Closing THIS window does NOT stop the server;
-echo   close the DreamDaemon window to stop it.
+echo   Closing THIS window does NOT stop the server.
+echo   To stop the server: close the DreamDaemon window,
+echo   or just double-click stop_server.bat (recommended).
 echo ============================================================
 echo.
 

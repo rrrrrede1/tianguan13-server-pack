@@ -17,7 +17,7 @@
 # 用法：./pack/scripts/patch-lobby.ps1 -SrcDir src
 
 [CmdletBinding()]
-param([string]$SrcDir = 'src')
+param([string]$SrcDir = 'src', [switch]$Diagnostics)
 
 $ErrorActionPreference = 'Stop'
 
@@ -101,7 +101,8 @@ if ($skB -match 'class="bg"') {
   Write-Host "  [ok] 天关版: 主菜单背景改为纯黑（不再显示 SPLURT 那张图）"
 } else { Write-Host "  [skip] 天关版背景已处理" }
 
-# ---------- 3. 运行期自检日志（TG-DIAG）----------
+# ---------- 3. 运行期自检日志（TG-DIAG，仅在 -Diagnostics 时注入）----------
+if ($Diagnostics) {
 # 目的：大厅是否真的用了天关版 HTML、图标能不能从磁盘找到，都写进 data\server.log，
 #       玩家一开服就能看到，不用靠猜。看到 TG-DIAG 行就说明这些代码真的在跑。
 $np = Join-Path $SrcDir 'modular_skyrat/modules/title_screen/code/new_player.dm'
@@ -137,6 +138,8 @@ if ($npTxt -notmatch 'TG-DIAG final_html') {
   [IO.File]::WriteAllText($np, $npTxt, (New-Object Text.UTF8Encoding($false)))
   Write-Host "  [ok] update_title_screen: 已插入 TG-DIAG + HTML 落盘（data/tg_lobby_debug.html）"
 } else { Write-Host "  [skip] update_title_screen 已有 TG-DIAG" }
+
+}  # end Diagnostics
 
 # ---------- 4. 自检（改完必须验，别信"写成功"） ----------
 $zzAfter = [IO.File]::ReadAllText($zzplurt, [Text.Encoding]::UTF8)

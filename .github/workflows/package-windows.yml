@@ -25,6 +25,11 @@ on:
         description: '发布成 Release 用的 tag（留空 = 只上传 Artifact）'
         required: false
         default: ''
+      debug_lobby:
+        description: '大厅诊断：注入 TG-DIAG 日志并把生成的大厅 HTML 落盘（日常构建请留 false）'
+        required: false
+        type: boolean
+        default: false
       server_name:
         description: '服务器显示名（写进 config.txt 的 SERVERNAME）'
         required: false
@@ -230,7 +235,12 @@ jobs:
       # 补丁只改工作区里的 src/，源码仓库保持零差异。
       - name: Patch lobby title screen
         shell: pwsh
-        run: ./pack/scripts/patch-lobby.ps1 -SrcDir src
+        env:
+          TG_LOBBY_DEBUG: ${{ inputs.debug_lobby }}
+        run: |
+          $extra = @()
+          if ("$env:TG_LOBBY_DEBUG" -eq 'true') { $extra = @('-Diagnostics'); Write-Host '大厅诊断已开启（会写 TG-DIAG 日志 + data/tg_lobby_debug.html）' }
+          ./pack/scripts/patch-lobby.ps1 -SrcDir src @extra
 
       # ---------- 5. 编译 DM（-DCBT 由 build.ts 负责；顺带下 cutter + python） ----------
       - name: Compile DM

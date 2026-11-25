@@ -71,6 +71,36 @@ if ($sk -match 'tg_lobby_suppressed\(\)') {
   Write-Host "  [ok] 天关版: get_title_html() 开头已插入 tg_lobby_suppressed() 守卫"
 }
 
+# ---------- 2.5 外观：去掉侧栏展示图（PLEASE WAIT），背景改全黑 ----------
+# 实测：天关仓库里没有横幅尺寸的大厅展示图，只有 modular_tianguan/icons/tianguan_logo.png（32x32）。
+# TG_LOBBY_ART_CANDIDATES 的前两个候选（lobby_art.gif/png）不存在 → 回落到
+# modular_skyrat/.../loading_screen.gif，就是玩家看到的 "PLEASE WAIT"。
+# 展示框 CSS 是 width:100% height:18vmin object-fit:cover，把 32x32 拉进去只会糊成一团，
+# 所以按用户要求：不放展示图，背景由纯黑 div 负责。
+$skA = [IO.File]::ReadAllText($skyrat, [Text.Encoding]::UTF8)
+if ($skA -match 'class="tg_art"') {
+  $patArt = '(?m)^\t\tvar/art_tag = tg_lobby_art_html\(\)\r?\n\t\tif\(art_tag\)\r?\n\t\t\tdat \+= \{"<div class="tg_art">\[art_tag\]</div>"\}'
+  $mA = [regex]::Match($skA, $patArt)
+  if (-not $mA.Success) { throw "patch-lobby: 找不到 tg_art 的输出块（上游改了？）请人工看一下 $skyrat" }
+  $replA = "`t`t// [pack-patch] 天关无横幅尺寸的大厅展示图（仅 32x32 logo），此处不再输出 tg_art，" +
+           "`n`t`t// 避免回落到 SPLURT 的 loading_screen.gif（玩家看到的 PLEASE WAIT）。"
+  $skA = $skA.Remove($mA.Index, $mA.Length).Insert($mA.Index, $replA)
+  [IO.File]::WriteAllText($skyrat, $skA, (New-Object Text.UTF8Encoding($false)))
+  Write-Host "  [ok] 天关版: 已移除侧栏展示图（tg_art）"
+} else { Write-Host "  [skip] 天关版已无 tg_art 输出" }
+
+$skB = [IO.File]::ReadAllText($skyrat, [Text.Encoding]::UTF8)
+if ($skB -match 'class="bg"') {
+  $patBg = '(?m)^(\t)else\r?\n\t\tdat \+= \{"<img src="loading_screen\.gif" class="bg" alt="">"\}'
+  $mB = [regex]::Match($skB, $patBg)
+  if (-not $mB.Success) { throw "patch-lobby: 找不到主菜单背景 <img class=bg> 的输出（上游改了？）" }
+  $blackDiv = '<div style="position:fixed;left:0;top:0;width:100%;height:100%;background-color:#000"></div>'
+  $replB = $mB.Groups[1].Value + "else`n`t`tdat += {`"$blackDiv`"}"
+  $skB = $skB.Remove($mB.Index, $mB.Length).Insert($mB.Index, $replB)
+  [IO.File]::WriteAllText($skyrat, $skB, (New-Object Text.UTF8Encoding($false)))
+  Write-Host "  [ok] 天关版: 主菜单背景改为纯黑（不再显示 SPLURT 那张图）"
+} else { Write-Host "  [skip] 天关版背景已处理" }
+
 # ---------- 3. 运行期自检日志（TG-DIAG）----------
 # 目的：大厅是否真的用了天关版 HTML、图标能不能从磁盘找到，都写进 data\server.log，
 #       玩家一开服就能看到，不用靠猜。看到 TG-DIAG 行就说明这些代码真的在跑。

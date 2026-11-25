@@ -8,12 +8,42 @@
 
 | 方式 | 结果 |
 |---|---|
-| CT124 同步上游后 `repository_dispatch`（`event_type=source-updated`，带精确 sha） | 自动构建 + 发 `server-<短sha>` 的 Release |
+| 同步器发现上游更新后 `repository_dispatch`（`event_type=source-updated`，带精确 sha） | 自动构建 + 发 `server-<短sha>` 的 Release |
 | Actions → Run workflow，填 `ref`（分支 / tag / 完整或短 sha）、`release_tag` 留空 | 只上传 Artifact，不发 Release |
 | Run workflow 且填 `release_tag` | 构建 + 发到指定 tag |
 | 往本仓库推 `server-*` 的 tag | 构建 + 发 Release（源码 ref 取 `main`） |
 
 不发 Release 的手动运行适合验证改动，不会污染 Release 页面。
+
+## 自动同步是怎么实现的
+
+**这个仓库本身没有定时器。** GitHub 的 `schedule` 在这个环境实测不可靠（连续几天 0 次触发，对照组 pytorch 之类却正常），所以自动同步交给作者本地的一台机器做。
+
+### 那台机器是什么
+
+CT124：作者家里 Proxmox（PVE）宿主机上的一个 **LXC 容器**，Debian 12，1 核 / 512 MB 内存，IP 由 DHCP 分配、不对外提供任何入站服务。它是作者的私人基础设施，**不属于这个项目**，其他开发者也不需要它。
+
+### 每 10 分钟做三件事
+
+容器内 root crontab 是 `*/10 * * * *`，经一个带 `flock` 的 `run-job.sh` 调 `jobs/tianguan-sync.sh`（日志写在 `/opt/oddjobs/logs/`）。脚本每次：
+
+1. **取上游 head sha** —— 优先 `api.github.com`，公开的 atom feed 只作兜底。这台机器的网络上 `github.com` 时通时不通，而 `api.github.com` 稳。
+2. **让 fork 跟上上游** —— 若和记录里的 `last-upstream-sha` 不同，就 `POST /repos/<fork>/merge-upstream`，等价于网页上点 "Sync fork"。fork 因此长期保持与上游零差异。
+3. **触发构建** —— 若和 `last-dispatched-sha` 不同，就 `POST /repos/<本仓库>/dispatches`，`event_type=source-updated`，payload 里带**精确的 40 位 sha**，本仓库的 workflow 用这个 sha 去克隆源码。
+
+两个 sha 分开记账，这是关键：dispatch 失败时 `last-dispatched-sha` 不更新，下一轮自动重试；成功后两者相等，不会重复构建。冲突（409）时同样不记账，下一轮重试，日志里会写明需要人工解决一次。
+
+### 凭据
+
+一把 fine-grained PAT，只存在容器内 `/root/.config/tianguan-sync/token`（`0600 root:root`，90 天过期），权限是**两个仓库的 Contents: write**：改 fork 需要它，发 `repository_dispatch` 也需要它。主机的 `/home` 下不放任何凭据。
+
+### 它需要提交到仓库吗
+
+已经提交了（`scripts/tianguan-sync.sh`），但定位是**参考实现**：
+
+- 它**不会被打进 Release 包**，也不影响手动触发构建
+- 想搭同一套自动同步的人可以照抄，改三个变量即可：`UPSTREAM` / `FORK` / `PACK_REPO`
+- **没有它照样能用**：Actions → Run workflow 手动触发，或者在你自己的 CI / 服务器上只做上面第 2、3 步
 
 ## 流水线做了什么
 
@@ -99,6 +129,6 @@ bash tools/deploy.sh ../out/TianGuan13_Server
 .github/workflows/package-windows.yml   主流水线
 scripts/patch-lobby.ps1                 编译前的大厅补丁（幂等 + 自检）
 scripts/smoke-test.ps1                  真启动一次并等 Initializations complete
-scripts/tianguan-sync.sh                CT124 上跑的那份同步器（同步 fork + 触发打包）
-launcher/*.bat                          放进包里的三个启动脚本
+scripts/tianguan-sync.sh                自动同步器（参考实现，跑在作者本地的 CT124 上，不打进包）
+launcher/*.bat                          放进包里的启动脚本（开服 / 停服 / 加管理员 / 重编译）
 ```

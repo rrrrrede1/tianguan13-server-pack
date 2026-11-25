@@ -19,15 +19,17 @@
 set -uo pipefail
 
 # ---------------- 配置 ----------------
-UPSTREAM="TianguanStation/Tianguan13"
-FORK="rrrrrede1/Tianguan13"
-BRANCH="main"
+# 三个仓库名都可用环境变量覆盖，方便别人复刻这套自动同步：
+#   UPSTREAM=上游上游/仓库 FORK=你的/fork PACK_REPO=你的/打包仓库 ./tianguan-sync.sh
+UPSTREAM="${UPSTREAM:-TianguanStation/Tianguan13}"
+FORK="${FORK:-rrrrrede1/Tianguan13}"
+BRANCH="${BRANCH:-main}"
 # 打包仓库（空 = 不触发打包）。留空也能跑，只是不派发。
 PACK_REPO="${PACK_REPO:-rrrrrede1/tianguan13-server-pack}"
 PACK_EVENT="${PACK_EVENT:-source-updated}"
 
-TOKEN_FILE="/root/.config/tianguan-sync/token"
-STATE_DIR="/root/.local/state/tianguan-sync"
+TOKEN_FILE="${TOKEN_FILE:-/root/.config/tianguan-sync/token}"
+STATE_DIR="${STATE_DIR:-/root/.local/state/tianguan-sync}"
 MERGED_SHA_FILE="$STATE_DIR/last-upstream-sha"
 DISPATCHED_SHA_FILE="$STATE_DIR/last-dispatched-sha"
 

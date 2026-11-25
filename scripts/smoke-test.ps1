@@ -59,7 +59,14 @@ while ((Get-Date) -lt $deadline) {
   if (Test-Path $log) {
     $size = (Get-Item $log).Length
     if ($size -ne $lastSize) { $lastSize = $size }
-    if (Select-String -Path $log -Pattern 'Initializations complete' -Quiet) { $ok = $true; break }
+    $hit = Select-String -Path $log -Pattern 'Initializations complete' | Select-Object -First 1
+    if ($hit) {
+      $ok = $true
+      # ⚠️ 必须现在就取到这一行：下面清理阶段会删掉 data\server.log（run #17 就是在这里炸的）
+      $successLine = $hit.Line.Trim()
+      $ambienceErrors = (Select-String -Path $log -Pattern 'play_ambience failed' | Measure-Object).Count
+      break
+    }
   }
 }
 
@@ -106,9 +113,10 @@ if (-not $ok) {
   throw 'SMOKE TEST FAILED: did not see "Initializations complete"'
 }
 
-$line = (Select-String -Path $log -Pattern 'Initializations complete' | Select-Object -First 1).Line.Trim()
+$line = $successLine
 Write-Host "SMOKE TEST OK: $line"
 
-# 顺带报一下 runtime 噪声，但不判失败（ambience 那类错误不影响玩法）
-$amb = (Select-String -Path $log -Pattern 'play_ambience failed' | Measure-Object).Count
+# 顺带报一下 runtime 噪声，但不判失败（ambience 那类错误不影响玩法；日志已被清理，所以用前面记下的计数）
+$amb = 0
+if ($null -ne $ambienceErrors) { $amb = $ambienceErrors }
 if ($amb -gt 0) { Write-Warning "play_ambience runtime x$amb（声音文件缺失的表现；deploy 阶段有镜像 sound/ 的话应该为 0）" }

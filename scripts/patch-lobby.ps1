@@ -99,10 +99,13 @@ if ($npTxt -notmatch 'TG-DIAG final_html') {
   $m3 = [regex]::Match($npTxt, '(?m)^(\t+)var/dat = get_title_html\(\)')
   if (-not $m3.Success) { throw "patch-lobby: 找不到 `var/dat = get_title_html()`（无法插入 TG-DIAG）" }
   $tab3 = $m3.Groups[1].Value
-  $diag2 = $tab3 + 'log_world("TG-DIAG final_html len=[length(dat)]")'
+  $diag2 = @(
+    ($tab3 + 'log_world("TG-DIAG final_html len=[length(dat)]")'),
+    ($tab3 + 'if(dat) text2file(dat, "data/tg_lobby_debug.html")')
+  ) -join "`n"
   $npTxt = $npTxt.Remove($m3.Index, $m3.Length).Insert($m3.Index, $m3.Value + "`n" + $diag2)
   [IO.File]::WriteAllText($np, $npTxt, (New-Object Text.UTF8Encoding($false)))
-  Write-Host "  [ok] update_title_screen: 已插入 TG-DIAG 结束日志"
+  Write-Host "  [ok] update_title_screen: 已插入 TG-DIAG + HTML 落盘（data/tg_lobby_debug.html）"
 } else { Write-Host "  [skip] update_title_screen 已有 TG-DIAG" }
 
 # ---------- 4. 自检（改完必须验，别信"写成功"） ----------

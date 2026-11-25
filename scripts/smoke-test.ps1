@@ -74,8 +74,27 @@ if (-not $p.HasExited) {
   Write-Host "(32 位进程：private 才是真实堆压力；working set 含 mmap 的资源文件)"
   if ($privMB -gt 1500) { Write-Warning "私有内存 ${privMB} MB 偏高（32 位上限约 2-4GB，长期跑有风险）" }
   $memMB = $privMB
-  Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+  # ⚠️ 只 Stop-Process 不够：实测 7z 紧接着就会报
+  #    "The process cannot access the file because it is being used by another process"
+  #    （运行时还在写 tgstation.dyn.rsc / data\server.log）。所以要等它真退出，再清运行时产物。
+  Get-Process -Name dd,dreamdaemon -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  try { $p.WaitForExit(15000) | Out-Null } catch { }
   Start-Sleep -Seconds 2
+}
+
+# ---- 清掉运行时生成物（它们会在下次启动时重建；留在包里既占体积又会锁文件）----
+$artifacts = @(
+  'tgstation.dyn.rsc', 'tgstation.dyn.rsc.lk', 'tgstation.rsc.lk',
+  'data\server.log', 'data\console-out.log', 'data\console-err.log', 'data\probe.log'
+)
+foreach ($rel in $artifacts) {
+  $f = Join-Path $pkg $rel
+  if (Test-Path $f) {
+    for ($try = 1; $try -le 5; $try++) {
+      try { Remove-Item $f -Force -ErrorAction Stop; Write-Host "  cleaned $rel"; break }
+      catch { if ($try -eq 5) { Write-Warning "cleanup failed: $rel ($($_.Exception.Message))" } else { Start-Sleep -Seconds 2 } }
+    }
+  }
 }
 
 if (-not $ok) {

@@ -432,8 +432,25 @@ jobs:
           $src   = "TianGuan13-Source-$short.zip"
           $root  = (Get-Location).Path
 
-          7z a -tzip -mx=5 "$name" "${{ env.OUT_DIR }}\*" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "7z failed" }
+          # 兜底：万一还有 dd/dreamdaemon 残留，先清掉；再把运行时产物删一遍
+          Get-Process -Name dd,dreamdaemon -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          foreach ($rel in 'tgstation.dyn.rsc','tgstation.dyn.rsc.lk','tgstation.rsc.lk') {
+            $f = Join-Path "${{ env.OUT_DIR }}" $rel
+            if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue; Write-Host "  pre-clean $rel" }
+          }
+
+          # 实测 run #14：7z 会因"文件被另一个进程占用"失败 → 重试 3 次
+          $ok = $false
+          for ($try = 1; $try -le 3; $try++) {
+            if (Test-Path $name) { Remove-Item $name -Force -ErrorAction SilentlyContinue }
+            7z a -tzip -mx=5 "$name" "${{ env.OUT_DIR }}\*" | Out-Null
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Warning "7z attempt $try failed (exit $LASTEXITCODE)，10 秒后重试"
+            Get-Process -Name dd,dreamdaemon -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 10
+          }
+          if (-not $ok) { throw "7z failed after 3 attempts（多为运行时文件仍被占用）" }
 
           # ⚠️ git -C src 会先切到 src/ 再执行，所以 -o 必须给绝对路径，
           #    否则 zip 会落在 src\ 里（run #11 就是这样：git 返回 0 但根目录没有文件）

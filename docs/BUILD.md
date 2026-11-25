@@ -1,134 +1,173 @@
 # 构建说明
 
-这份文件是给维护者的。玩家只需要看根目录的 [README](../README.md)。
+本文面向维护者，说明发布包是如何产生的。玩家只需阅读根目录的 [README](../README.md)。
 
-这个仓库**不含源码**，只有打包脚本和启动器。每次构建都从源码仓库现场拉取指定 commit，编译、组装、真启动一次验收，然后打包发版。
+这个仓库不包含游戏源码，只保存打包脚本与启动器。每次构建都从源码仓库拉取指定的 commit，编译、组装、启动验证，然后打包发布。
 
-## 触发方式
+---
+
+## 一、触发方式
 
 | 方式 | 结果 |
 |---|---|
-| 同步器发现上游更新后 `repository_dispatch`（`event_type=source-updated`，带精确 sha） | 自动构建 + 发 `server-<短sha>` 的 Release |
-| Actions → Run workflow，填 `ref`（分支 / tag / 完整或短 sha）、`release_tag` 留空 | 只上传 Artifact，不发 Release |
-| Run workflow 且填 `release_tag` | 构建 + 发到指定 tag |
-| 往本仓库推 `server-*` 的 tag | 构建 + 发 Release（源码 ref 取 `main`） |
+| 同步节点 `repository_dispatch`（`event_type` 为 `source-updated`，payload 携带完整 sha） | 构建并发布 `server-<短sha>` 版本 |
+| Actions 手动运行，`ref` 填分支 / tag / 完整或短 sha，`release_tag` 留空 | 仅上传 Artifact，不发布版本 |
+| Actions 手动运行并填写 `release_tag` | 构建并发布到指定 tag |
+| 向本仓库推送 `server-*` 形式的 tag | 构建并发布，源码 ref 取 `main` |
 
-不发 Release 的手动运行适合验证改动，不会污染 Release 页面。
+手动运行且不填 `release_tag` 时不会产生版本记录，适合验证改动。
 
-## 自动同步是怎么实现的
+手动运行时另有一个 `debug_lobby` 选项，默认关闭。开启后会在构建期向大厅代码注入诊断日志，并将生成的大厅页面写入 `data/tg_lobby_debug.html`，用于排查大厅界面的显示问题。
 
-**这个仓库本身没有定时器。** GitHub 的 `schedule` 在这个环境实测不可靠（连续几天 0 次触发，对照组 pytorch 之类却正常），所以自动同步交给作者本地的一台机器做。
+---
 
-### 那台机器是什么
+## 二、上游同步
 
-CT124：作者家里 Proxmox（PVE）宿主机上的一个 **LXC 容器**，Debian 12，1 核 / 512 MB 内存，IP 由 DHCP 分配、不对外提供任何入站服务。它是作者的私人基础设施，**不属于这个项目**，其他开发者也不需要它。
+### 2.1 同步节点
 
-### 每 10 分钟做三件事
+构建不使用 GitHub 的 `schedule` 定时触发。该机制在当前网络环境下未能稳定生效，因此上游变更由一台独立的同步节点探测。
 
-容器内 root crontab 是 `*/10 * * * *`，经一个带 `flock` 的 `run-job.sh` 调 `jobs/tianguan-sync.sh`（日志写在 `/opt/oddjobs/logs/`）。脚本每次：
+同步节点（下称 CT124）是维护者自建的内网 LXC 容器，运行在 Proxmox 宿主机上，Debian 12，1 核 / 512 MB，由 DHCP 分配地址，不对外提供任何入站服务。它属于维护者的私人基础设施，与本项目相互独立，其他部署方无需具备。
 
-1. **取上游 head sha** —— 优先 `api.github.com`，公开的 atom feed 只作兜底。这台机器的网络上 `github.com` 时通时不通，而 `api.github.com` 稳。
-2. **让 fork 跟上上游** —— 若和记录里的 `last-upstream-sha` 不同，就 `POST /repos/<fork>/merge-upstream`，等价于网页上点 "Sync fork"。fork 因此长期保持与上游零差异。
-3. **触发构建** —— 若和 `last-dispatched-sha` 不同，就 `POST /repos/<本仓库>/dispatches`，`event_type=source-updated`，payload 里带**精确的 40 位 sha**，本仓库的 workflow 用这个 sha 去克隆源码。
+### 2.2 每轮执行的动作
 
-两个 sha 分开记账，这是关键：dispatch 失败时 `last-dispatched-sha` 不更新，下一轮自动重试；成功后两者相等，不会重复构建。冲突（409）时同样不记账，下一轮重试，日志里会写明需要人工解决一次。
+容器内以 root crontab 每 10 分钟调度一次 `tianguan-sync.sh`，调度器提供文件锁与运行日志。每轮依次执行：
 
-### 凭据
+1. **读取上游最新提交**：优先请求 `api.github.com`，公开的 atom feed 作为兜底。该网络环境下 `github.com` 的连接不稳定，而 API 端点正常。
+2. **同步 fork**：若与记录的 `last-upstream-sha` 不一致，调用 `merge-upstream` 使 fork 快进到上游，效果等同于网页端的 Sync fork。fork 因此长期与上游保持一致。
+3. **触发构建**：若与记录的 `last-dispatched-sha` 不一致，向本仓库发送 `repository_dispatch`，事件类型为 `source-updated`，payload 携带完整的 40 位 sha。工作流据此检出对应提交。
 
-一把 fine-grained PAT，只存在容器内 `/root/.config/tianguan-sync/token`（`0600 root:root`，90 天过期），权限是**两个仓库的 Contents: write**：改 fork 需要它，发 `repository_dispatch` 也需要它。主机的 `/home` 下不放任何凭据。
+### 2.3 状态与重试
 
-### 它需要提交到仓库吗
+两个 sha 分别记录在 `last-upstream-sha` 与 `last-dispatched-sha` 中：
 
-已经提交了（`scripts/tianguan-sync.sh`），但定位是**参考实现**：
+- 派发失败时不写入 `last-dispatched-sha`，下一轮自动重试
+- 派发成功后两者一致，不会重复触发构建
+- 同步冲突（HTTP 409）同样不记录状态，下一轮重试；日志中会注明该情况需要人工介入一次
 
-- 它**不会被打进 Release 包**，也不影响手动触发构建
-- 想搭同一套自动同步的人可以照抄，改三个变量即可：`UPSTREAM` / `FORK` / `PACK_REPO`
-- **没有它照样能用**：Actions → Run workflow 手动触发，或者在你自己的 CI / 服务器上只做上面第 2、3 步
+### 2.4 凭据
 
-## 流水线做了什么
+同步节点使用一个 fine-grained token，仅存放于容器内 `/root/.config/tianguan-sync/token`（`0600`，root 所有），有效期 90 天。所需权限为两个仓库的 `Contents: write`：更新 fork 与发送 `repository_dispatch` 均依赖该权限。宿主机其他目录不保存任何凭据。
 
-| # | 步骤 | 为什么必须这样 |
-|---|---|---|
-| 1 | `Resolve source ref` | `actions/checkout` 不认短 sha，先用 API 补全成 40 位 |
-| 2 | 浅克隆源码（`fetch-depth: 1`） | 仓库历史 3.5 GB，全量拉取不现实 |
-| 3 | 从 `dependencies.sh` 读 BYOND / Bun 版本 | 版本单一来源，硬编码会在上游升版后悄悄坏掉 |
-| 4 | 下载 BYOND（缓存 + 429 重试） | byond.com 会限流 |
-| 5 | 安装 x86 VC++ 运行库并**找到** DLL | 安装器可能返回 1638（已装更新版本），所以还要去 `SysWOW64` / VS 的 `VC\Redist` 里把 `mfc140u.dll` 等捞出来 |
-| 6 | 构建 tgui / tgfont（绕过 `biome-install`） | `biome-install` 只服务 lint，却是 `tgui` 目标的硬依赖，实测会因 tarball 损坏把 tgui 连带拖死 |
-| 7 | **大厅补丁**（`scripts/patch-lobby.ps1`） | 见下节 |
-| 8 | `bun tools/build/build.ts dm` | 它内部负责 cutter 下载 → 图标切割 → 行为树(Python) → `dm.exe -DCBT`。别手敲 `dm.exe`，会漏掉图标切割 |
-| 9 | `bash tools/deploy.sh` 组装 | 官方最小运行清单 |
-| 10 | 补 VC++ / DX9 运行库 | BYOND 的 zip 不自带 MFC 和 `d3dx9_43.dll`，缺了 `dreamdaemon` 直接 `0xC0000135` 秒退；打进 `byond\bin`（app-local）后玩家也不用装 |
-| 11 | 补大厅资源 + **运行时磁盘资源** | 见下节 |
-| 12 | **审计 `file("...")` 字面路径** | 代码里运行时从磁盘读的文件，包里缺一个就静默坏一块功能，所以逐个比对，缺了就 fail |
-| 13 | 冒烟测试（真启动） | 用 `dd.exe` 跑到 `Initializations complete`，不看这一条等于把"能编译但跑不起来"的包发给玩家 |
-| 14 | 打包 + 源码归档 + SHA256 | AGPL 要求同页提供对应源码 |
-| 15 | Artifact（总是）+ Release（按触发方式） | 手动跑默认不污染 Release |
+### 2.5 脚本
 
-## 大厅补丁：为什么需要
+`scripts/tianguan-sync.sh` 即上述同步脚本的实现，随仓库保留，便于复刻同一套自动化流程。脚本中的仓库地址、状态目录与凭据路径均可由环境变量覆盖，默认值为当前部署所使用的取值。
 
-上游 `tgstation.dme` 里编了**三份** title screen 实现，同路径 proc 后者覆盖前者：
+该脚本不参与构建，也不会进入发布包。不具备同步节点时，通过 Actions 手动运行或自行实现第 2、3 步即可完成同样的触发。
 
-```
-modular_skyrat/modules/title_screen/...  (天关定制大厅，564 行)  ← 第 9103 行
-modular_zubbers/.../title_screen_subsystem.dm                    ← 第 10475 行
-modular_zzplurt/.../new_player/title_screen_html.dm              ← 第 11042 行（最后编译）
-```
+---
 
-`modular_zzplurt` 那个文件只有 5 行，重新定义了 `get_title_html()`，会把天关版整段覆盖；而它的 `..()` 只能调到父类型 `/mob`（没有这个 proc），于是返回 null，大厅浏览器渲染成空白。**编译是 `0 errors`，BYOND 静默覆盖，没有任何报警。**
+## 三、构建流程
 
-`scripts/patch-lobby.ps1` 在编译前改**工作区里的 `src/`**（不碰源码仓库）：
-
-- 把 zzplurt 那份改名成 `tg_lobby_suppressed()`，保留它"启动期/自定义载入条时不显示大厅"的原意，并在天关版 `get_title_html()` 开头调用
-- 移除侧栏展示图（天关没有横幅尺寸的素材，只有 32×32 的 logo；原来会回落到 SPLURT 的 `PLEASE WAIT` gif）
-- 主菜单背景改成纯黑（原来用的是 SPLURT 的 `splurt_banner_background.png`）
-- 顺带注入 `TG-DIAG` 日志和 `data/tg_lobby_debug.html` 落盘（调试用，正式版可以去掉）
-
-脚本是幂等的，跑第二遍会 `[skip]`，改完自带自检。
-
-## 运行时磁盘资源：deploy.sh 管不到的那批
-
-`tools/deploy.sh` 只拷 dmb/rsc/地图/图标/声音/tgui。但代码里有一批文件是**运行时用 `file()` / `fexists()` 从磁盘读**的，必须单独补：
-
-| 目录 | 缺了会怎样 |
+| 步骤 | 说明 |
 |---|---|
-| `html/`（statbrowser + changelogs + jquery + font-awesome） | 右上状态面板全白、没有"状态/管理/IC/OOC"标签（statbrowser 的 html/js/css 就在这里） |
-| `modular_tianguan/modules/tg_lobby/{icons,sound}` | 大厅侧栏图标、按钮音效缺失 |
+| 解析源码 ref | `actions/checkout` 不接受短 sha，先经 API 补全为完整 sha |
+| 检出源码 | `fetch-depth: 1`。仓库历史约 3.5 GB，全量拉取不现实 |
+| 读取工具链版本 | BYOND 与 Bun 的版本取自 `dependencies.sh`，避免硬编码在版本升级后失效 |
+| 获取 BYOND | 带缓存，并对 byond.com 的限流做重试 |
+| 准备 x86 VC++ 运行库 | 安装器可能返回 1638（已存在更新版本），因此还需从 `SysWOW64` 与 Visual Studio 的 `VC\Redist` 目录中定位所需 DLL |
+| 构建 tgui 与 tgfont | 直接执行构建脚本，跳过 `biome-install`。该步骤只服务于代码检查，却是 tgui 目标的硬依赖，且曾因压缩包损坏导致构建中断 |
+| 应用大厅补丁 | 见第四章 |
+| 编译 DM | 通过 `tools/build/build.ts dm` 驱动，内部完成图标切割、行为树生成与带 `-DCBT` 的编译。直接调用 `dm.exe` 会遗漏前置步骤 |
+| 组装运行目录 | 执行 `tools/deploy.sh`，生成官方最小运行清单 |
+| 补入运行库 | 将 VC++ 运行库与 DirectX 9 的 `d3dx9_43.dll`、`D3DCompiler_43.dll` 放入 `byond\bin`，详见第五章 |
+| 补入运行时资源 | 见第五章 |
+| 审计磁盘资源 | 扫描源码中全部 `file("...")` 字面路径，与产物逐一比对，缺失则中断构建 |
+| 启动验证 | 实际启动服务器，直至出现 `Initializations complete`，未通过则不产出发布包 |
+| 打包与校验 | 生成运行包、源码包与 `SHA256SUMS.txt` |
+| 上传与发布 | Artifact 每次上传；版本发布依触发方式决定 |
+
+---
+
+## 四、大厅界面
+
+上游的 `tgstation.dme` 编译了三份标题界面实现，且定义了同名的过程，后编译者覆盖先编译者：
+
+```
+modular_skyrat/modules/title_screen/...          天关定制大厅，564 行
+modular_zubbers/.../title_screen_subsystem.dm
+modular_zzplurt/.../new_player/title_screen_html.dm   最后编译
+```
+
+`modular_zzplurt` 中的这份实现仅五行，重新定义了 `get_title_html()`，会整段覆盖天关大厅的界面代码；其中的 `..()` 只能解析到父类型 `/mob`，该类型并无此过程，于是返回空值，大厅页面因此渲染为空白。编译器对此不产生任何警告，构建仍报告 `0 errors`。
+
+`scripts/patch-lobby.ps1` 在编译前修改工作区内的 `src/`，不涉及源码仓库：
+
+1. 将 `modular_zzplurt` 中的定义更名为 `tg_lobby_suppressed()`，保留其"启动阶段或载入画面显示期间不展示大厅"的原意，并在天关版 `get_title_html()` 开头调用该判断
+2. 移除侧栏展示图。天关仓库中没有横幅尺寸的素材，仅有一枚 32×32 的标志，原逻辑会回落到 SPLURT 的加载图
+3. 主菜单背景改为纯色黑，替代原先使用的 SPLURT 背景图
+
+脚本可重复执行，第二次运行会跳过已完成的部分，并在结束时自检改动结果。
+
+---
+
+## 五、运行时资源
+
+`tools/deploy.sh` 生成的是最小运行清单，覆盖编译产物、地图、图标、音效与 tgui 界面。另有一批文件由代码在运行期通过 `file()` 与 `fexists()` 从磁盘读取，需要单独补入：
+
+| 目录 | 缺失后的表现 |
+|---|---|
+| `html/` | 右上状态面板空白，缺少「状态 / 管理 / IC / OOC」等标签（面板脚本 `statbrowser` 的三份文件位于其中） |
+| `modular_tianguan/modules/tg_lobby/{icons,sound}` | 大厅侧栏图标与按钮音效缺失 |
 | `modular_skyrat/modules/title_screen/icons` | 大厅载入图缺失 |
-| `interface/fonts/`、`modular_zh/modules/i18n/fonts/`、`tgui/packages/tgui-escape-menu/styles/` | 字体/样式缺失 |
+| `interface/fonts/`、`modular_zh/modules/i18n/fonts/`、`tgui/packages/tgui-escape-menu/styles/` | 字体与样式缺失 |
 
-`Audit runtime disk files` 步骤会扫 `src/**/*.dm` 里所有 `file("...")` 字面路径，只要仓库里有、包里没有就报错——上游以后新增这类文件时，构建会直接失败而不是发出一个坏包。
+构建中的 `Audit runtime disk files` 步骤会扫描源码中所有 `file("...")` 字面路径，凡是源码仓库存在而产物中缺失的，直接判定构建失败。上游新增同类资源时，构建会在该步骤报出，而不是发布一个功能不完整的包。
 
-## 踩过的坑
+---
 
-**`dreamdaemon.exe` 在无头 runner 上会卡死。** 它是 GUI 程序，60 秒后仍存活、零输出、不写日志。同一个包里 `dd.exe`（控制台版）23 秒就 `World loaded`。所以冒烟测试用 `dd.exe`；玩家端仍用 GUI 版，桌面环境体验更好。
+## 六、已知问题与处理
 
-**BYOND 的 zip 不自带运行库。** `dreamdaemon.exe` 依赖 `mfc140u.dll`（VC++ x86），而 `byondwin.dll` 又依赖 `d3d9.dll` + `d3dx9_43.dll`（DirectX June 2010）。缺任何一个都 `0xC0000135` 秒退，而开发机装了这些运行库时**完全复现不出来**。
+**守护进程在无图形界面的构建机上无法运行**
 
-**`set -o pipefail` + `curl | grep -m1` = SIGPIPE。** `grep -m1` 提前退出会让 curl 报 `curl: (23) Failure writing output to destination`，整步中止。改用 bash 正则解析。
+`dreamdaemon.exe` 为图形界面程序，在无显示环境的构建机上启动后无输出、不写日志，进程长期驻留。同一份产物中的 `dd.exe` 为控制台版本，启动后 23 秒即完成世界加载。启动验证因此使用 `dd.exe`；面向玩家的启动脚本仍使用图形界面版本，以便在桌面环境下查看窗口日志。
 
-**`git -C src archive -o <相对路径>` 会把 zip 写进 `src/` 里**（`-C` 先切目录），git 返回 0 但文件不在你以为的地方。要给绝对路径。
+**BYOND 安装包不含运行时库**
 
-**冒烟结束后必须清运行时产物。** 服务器还握着 `tgstation.dyn.rsc` / `data\server.log` 时，7z 会报 "The process cannot access the file" 而失败。现在会杀进程、等退出、删运行时产物，并给 7z 三次重试。
+`dreamdaemon.exe` 依赖 `mfc140u.dll`（x86 VC++ 运行库），`byondwin.dll` 又依赖 `d3d9.dll` 与 `d3dx9_43.dll`（DirectX 9）。任一缺失都会使进程以 `0xC0000135` 立即退出。开发机通常已安装这些运行库，因此该问题只在干净环境中出现。构建时将它们放入 `byond\bin`，运行环境无需另行安装。
 
-**`for ($i...) { } | Tee-Object` 非法**；`? :` 是 PowerShell 7 语法，本地 5.1 验不过。
+**管道提前关闭导致下载失败**
 
-## 本地复现
+在 `set -o pipefail` 下使用 `curl | grep -m1`，`grep` 命中后立即退出，`curl` 因写入失败返回错误码 23，整步中断。改用 shell 内的正则匹配，不经过管道。
+
+**源码归档路径错误**
+
+`git -C src archive -o <相对路径>` 会先切换到 `src/` 再执行，归档文件被写入该目录，而命令返回成功。现已改用绝对路径，并对产物是否存在做校验。
+
+**运行时文件被占用导致打包失败**
+
+启动验证结束后，服务器仍持有 `tgstation.dyn.rsc` 与日志文件，压缩时报告文件被占用。现在验证脚本会终止进程、等待退出并清理运行时产物，压缩步骤另设三次重试。
+
+**PowerShell 语法兼容性**
+
+`for (...) { } | Tee-Object` 不是合法的管道写法；`? :` 属于 PowerShell 7 语法，在 Windows PowerShell 5.1 下无法解析。
+
+---
+
+## 七、本地复现
 
 ```powershell
-# 假定源码已经 checkout 到 .\src
+# 假定源码已检出到 .\src
 $env:DM_EXE = "C:\path\to\byond\bin\dm.exe"
 bun tools/build/build.ts dm
 bash tools/deploy.sh ../out/TianGuan13_Server
 ./scripts/smoke-test.ps1 -PackageDir out/TianGuan13_Server
 ```
 
-## 目录
+编译必须带 `-DCBT`，且该参数需位于 `tgstation.dme` 之前，否则编译器会静默忽略，产物中电脑与控制台图标显示为错误占位图。`launcher/build_server.bat` 已按正确顺序编写。
+
+---
+
+## 八、目录结构
 
 ```
-.github/workflows/package-windows.yml   主流水线
-scripts/patch-lobby.ps1                 编译前的大厅补丁（幂等 + 自检）
-scripts/smoke-test.ps1                  真启动一次并等 Initializations complete
-scripts/tianguan-sync.sh                自动同步器（参考实现，跑在作者本地的 CT124 上，不打进包）
-launcher/*.bat                          放进包里的启动脚本（开服 / 停服 / 加管理员 / 重编译）
+.github/workflows/package-windows.yml   构建流水线
+docs/BUILD.md                           本文
+scripts/patch-lobby.ps1                 编译前的大厅补丁
+scripts/smoke-test.ps1                  启动验证脚本
+scripts/tianguan-sync.sh                上游同步脚本（不参与构建）
+launcher/start_server.bat               启动服务器并跟踪日志
+launcher/stop_server.bat                停止服务器与 BYOND 后台进程
+launcher/setup_admin.bat                添加管理员
+launcher/build_server.bat               修改源码后重新编译
 ```

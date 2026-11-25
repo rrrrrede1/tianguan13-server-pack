@@ -3,7 +3,9 @@
 > 基于 [TianguanStation/Tianguan13](https://github.com/TianguanStation/Tianguan13) 自动构建。
 > 已编译好的服务器 + 便携 BYOND 引擎 + 官方全量汉化（zh-Hans），解压即玩。
 
-**[⬇ 下载最新版](https://github.com/rrrrrede1/tianguan13-server-pack/releases/latest)**　·　[所有版本](https://github.com/rrrrrede1/tianguan13-server-pack/releases)　·　[上游仓库](https://github.com/TianguanStation/Tianguan13)
+## ⬇ [下载最新版](https://github.com/rrrrrede1/tianguan13-server-pack/releases/latest)
+
+[所有版本](https://github.com/rrrrrede1/tianguan13-server-pack/releases)　·　[上游仓库](https://github.com/TianguanStation/Tianguan13)　·　[构建说明](docs/BUILD.md)
 
 > 带 `Latest` 徽章的那条就是最新版；`.../releases/latest` 这个地址永远指向最新。
 

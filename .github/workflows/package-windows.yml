@@ -323,6 +323,26 @@ jobs:
             if (-not (Test-Path (Join-Path $out $must))) { throw "大厅资源缺失：$must（大厅图标/背景会空白）" }
           }
 
+          # 6.2.4 运行时从磁盘读的资源：deploy.sh 的最小清单完全没覆盖，漏一个就静默坏一块
+          #       实测：html/statbrowser.{html,js,css} 缺失 → 状态面板那个浏览器永远空白、
+          #       连"状态/管理/IC/导师/OOC"标签页都没有（截图对比确认）
+          $runtimeDirs = @(
+            'html',                                        # statbrowser + changelogs + jquery/font-awesome
+            'interface\fonts',                             # Grand9K_Pixel / Pixellari
+            'modular_zh\modules\i18n\fonts',                # escape menu 中文字体
+            'tgui\packages\tgui-escape-menu\styles'         # escape menu fonts.css
+          )
+          foreach ($rel in $runtimeDirs) {
+            $s = Join-Path 'src' $rel
+            if (-not (Test-Path $s)) { Write-Warning "运行时资源目录不存在（上游改了？）：$rel"; continue }
+            $d = Join-Path $out $rel
+            New-Item -ItemType Directory -Force $d | Out-Null
+            Copy-Item (Join-Path $s '*') $d -Recurse -Force
+            $n = (Get-ChildItem $d -Recurse -File | Measure-Object).Count
+            $mb = (Get-ChildItem $d -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+            Write-Host ("  runtime assets: {0}  ({1} 个文件 / {2:N1} MB)" -f $rel, $n, $mb)
+          }
+
           # 6.3 配置（注意：仓库的 config.txt 里没有 SERVERNAME / I18N_SERVER_LOCALE，必须追加）
           Copy-Item src\config $out\config -Recurse -Force
           $cfg = Join-Path $out 'config\config.txt'
@@ -350,6 +370,30 @@ jobs:
           New-Item -ItemType Directory -Force (Join-Path $out 'data') | Out-Null
           $size = ((Get-ChildItem $out -Recurse -File -Force | Measure-Object Length -Sum).Sum / 1MB)
           Write-Host ("package size = {0:N0} MB" -f $size)
+
+      # ---------- 6.95 审计：代码里 file("...") 的每个字面路径，包里都必须有 ----------
+      # 这些文件不被编译进 dmb，是运行时从磁盘读的；deploy.sh 的最小清单管不到它们。
+      # 一旦漏掉，功能会静默变空白（例：html/statbrowser.* 缺失 → 状态面板全白、无标签页）。
+      - name: Audit runtime disk files
+        shell: pwsh
+        run: |
+          $out = "${{ env.OUT_DIR }}"
+          $dmFiles = Get-ChildItem src -Recurse -Filter *.dm -File -ErrorAction SilentlyContinue
+          $hits = $dmFiles | Select-String -Pattern 'file\(\s*"([^"\[\]]+)"' -AllMatches
+          $paths = $hits | ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } |
+                   Where-Object { $_ -match '/' -and $_ -notmatch '^data/' } | Sort-Object -Unique
+          $missing = @()
+          foreach ($p in $paths) {
+            $rel = $p -replace '/', '\'
+            if (-not (Test-Path (Join-Path 'src' $rel))) { continue }   # 只在仓库里存在过的才算“该带上的”
+            if (-not (Test-Path (Join-Path $out $rel))) { $missing += $p }
+          }
+          Write-Host ("file() 字面路径 {0} 个；本应带上但包里缺失 {1} 个" -f $paths.Count, $missing.Count)
+          if ($missing.Count -gt 0) {
+            $missing | ForEach-Object { Write-Host "  MISSING: $_" }
+            throw "包里缺运行时资源（对应功能会静默变空白）：$($missing -join ', ')"
+          }
+          Write-Host "  ✓ 运行时资源齐全"
 
       # ---------- 6.9 诊断：谁缺 DLL 就让它自己说出来 ----------
       # 只打印信息，不判失败（真正的判据在冒烟测试）

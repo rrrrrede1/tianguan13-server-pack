@@ -609,15 +609,25 @@ jobs:
               if ($got.Count -lt 100) { break }
             }
 
-            $published = @($all | Where-Object { -not $_.draft } | Sort-Object { [datetime]$_.created_at } -Descending)
+            # 排序依据必须是 published_at。这些 release 的 created_at 可能是同一个值
+            # （取自 tag），按它排序顺序随机，裁剪结果不可预测。
+            $published = @($all | Where-Object { -not $_.draft } |
+                           Sort-Object -Property @{ Expression = { $_.published_at }; Descending = $true })
             Write-Host ("现有 {0} 条版本，保留最近 {1} 条（本次发布：{2}）" -f $published.Count, $keep, $protect)
 
-            $drop = @($published | Select-Object -Skip $keep | Where-Object { $_.tag_name -ne $protect })
+            $keepSet = @($published | Select-Object -First $keep)
+            if ($protect -and @($keepSet | Where-Object { $_.tag_name -eq $protect }).Count -eq 0) {
+              $keepSet = @($published | Where-Object { $_.tag_name -eq $protect }) +
+                         @($published | Select-Object -First ([Math]::Max(0, $keep - 1)))
+            }
+            $keepTags = @($keepSet | ForEach-Object { $_.tag_name } | Select-Object -Unique)
+            $drop = @($published | Where-Object { $keepTags -notcontains $_.tag_name })
+
             if ($drop.Count -eq 0) {
-              Write-Host "  无需清理"
+              Write-Host ("  无需清理，保留：{0}" -f ($keepTags -join ', '))
             } else {
               foreach ($r in $drop) {
-                Write-Host ("  删除 {0}（发布于 {1}）" -f $r.tag_name, $r.created_at)
+                Write-Host ("  删除 {0}（发布于 {1}）" -f $r.tag_name, $r.published_at)
                 try {
                   Invoke-RestMethod -Method Delete -Uri "$api/releases/$($r.id)" -Headers $headers | Out-Null
                 } catch {
@@ -632,8 +642,8 @@ jobs:
               }
             }
 
-            # 注意：Invoke-RestMethod 返回的数组不能被 @() 直接包（会被当成单个元素），
-            # 必须先展开再取属性，否则 Select-Object -ExpandProperty 会报 "cannot be found"。
+            # Invoke-RestMethod 返回的数组不能被 @() 直接包成单个元素后再取属性，
+            # 必须先展开，否则 Select-Object -ExpandProperty 会报 "cannot be found"。
             $after = Invoke-RestMethod -Uri "$api/releases?per_page=100" -Headers $headers
             $afterNames = @($after | ForEach-Object { $_.tag_name })
             Write-Host ("清理后剩余 {0} 条：{1}" -f $afterNames.Count, ($afterNames -join ', '))

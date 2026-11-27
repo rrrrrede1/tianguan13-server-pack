@@ -580,3 +580,55 @@ jobs:
             TianGuan13-Source-*.zip
             SHA256SUMS.txt
           fail_on_unmatched_files: true
+      # ---------- 11. 清理旧版本：只保留最近 5 条（刚发的那条永远保留）----------
+      # 上游一天能推几十个提交，每个提交一条版本，页面会很快堆满，所以发完就裁。
+      # 清理失败只告警、不让构建失败——它是收尾工作，不是发布的前置条件。
+      - name: Prune old releases
+        if: ${{ steps.rel.outputs.tag != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $keep = 5
+          $protect = "${{ steps.rel.outputs.tag }}"
+          $headers = @{
+            Authorization          = "Bearer $env:GH_TOKEN"
+            Accept                 = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+            'User-Agent'           = 'tianguan13-pack'
+          }
+          $api = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)"
+
+          $all = @()
+          for ($page = 1; $page -le 10; $page++) {
+            $batch = Invoke-RestMethod -Uri "$api/releases?per_page=100&page=$page" -Headers $headers
+            if (-not $batch -or @($batch).Count -eq 0) { break }
+            $all += $batch
+            if (@($batch).Count -lt 100) { break }
+          }
+
+          $published = @($all | Where-Object { -not $_.draft } | Sort-Object { [datetime]$_.created_at } -Descending)
+          Write-Host ("现有 {0} 条版本，保留最近 {1} 条（本次发布：{2}）" -f $published.Count, $keep, $protect)
+
+          $drop = @($published | Select-Object -Skip $keep | Where-Object { $_.tag_name -ne $protect })
+          if (-not $drop.Count) {
+            Write-Host "  无需清理"
+          } else {
+            foreach ($r in $drop) {
+              Write-Host ("  删除 {0}（发布于 {1}）" -f $r.tag_name, $r.created_at)
+              try {
+                Invoke-RestMethod -Method Delete -Uri "$api/releases/$($r.id)" -Headers $headers | Out-Null
+              } catch {
+                Write-Warning "    删除版本失败：$($_.Exception.Message)"
+                continue
+              }
+              try {
+                Invoke-RestMethod -Method Delete -Uri "$api/git/refs/tags/$([uri]::EscapeDataString($r.tag_name))" -Headers $headers | Out-Null
+              } catch {
+                Write-Warning "    对应 tag 未删除（可能已不存在）：$($r.tag_name)"
+              }
+            }
+          }
+
+          $after = @(Invoke-RestMethod -Uri "$api/releases?per_page=100" -Headers $headers)
+          Write-Host ("清理后剩余 {0} 条：{1}" -f $after.Count, (($after | Select-Object -ExpandProperty tag_name) -join ', '))
